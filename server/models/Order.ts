@@ -42,8 +42,8 @@ import Collective from './Collective';
 import Comment from './Comment';
 import CustomDataTypes from './DataTypes';
 import { MemberModelInterface } from './Member';
-import PaymentMethod, { PaymentMethodModelInterface } from './PaymentMethod';
-import { SubscriptionInterface } from './Subscription';
+import PaymentMethod from './PaymentMethod';
+import Subscription from './Subscription';
 import Tier from './Tier';
 import Transaction from './Transaction';
 import User from './User';
@@ -72,7 +72,7 @@ class Order extends Model<InferAttributes<Order>, InferCreationAttributes<Order>
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
   declare deletedAt?: Date;
-  declare PaymentMethodId?: ForeignKey<PaymentMethodModelInterface['id']>;
+  declare PaymentMethodId?: ForeignKey<PaymentMethod['id']>;
   declare processedAt?: Date;
   declare privateMessage?: string;
   declare TierId?: ForeignKey<Tier['id']>;
@@ -175,16 +175,16 @@ class Order extends Model<InferAttributes<Order>, InferCreationAttributes<Order>
   declare countTransactions: HasManyCountAssociationsMixin;
 
   // Order belongsTo PaymentMethod via PaymentMethodId
-  declare paymentMethod?: PaymentMethodModelInterface;
-  declare getPaymentMethod: BelongsToGetAssociationMixin<PaymentMethodModelInterface>;
-  // declare setPaymentMethod: BelongsToSetAssociationMixin<PaymentMethodModelInterface, PaymentMethodId>;
-  declare createPaymentMethod: BelongsToCreateAssociationMixin<PaymentMethodModelInterface>;
+  declare paymentMethod?: PaymentMethod;
+  declare getPaymentMethod: BelongsToGetAssociationMixin<PaymentMethod>;
+  // declare setPaymentMethod: BelongsToSetAssociationMixin<PaymentMethod, PaymentMethodId>;
+  declare createPaymentMethod: BelongsToCreateAssociationMixin<PaymentMethod>;
 
   // Order belongsTo SubscriptionInterface via SubscriptionInterface['id']
-  declare Subscription?: SubscriptionInterface;
-  declare getSubscription: BelongsToGetAssociationMixin<SubscriptionInterface>;
-  declare setSubscription: BelongsToSetAssociationMixin<SubscriptionInterface, SubscriptionInterface['id']>;
-  declare createSubscription: BelongsToCreateAssociationMixin<SubscriptionInterface>;
+  declare Subscription?: Subscription;
+  declare getSubscription: BelongsToGetAssociationMixin<Subscription>;
+  declare setSubscription: BelongsToSetAssociationMixin<Subscription, Subscription['id']>;
+  declare createSubscription: BelongsToCreateAssociationMixin<Subscription>;
 
   // Order belongsTo Tier via TierId
   declare tier?: Tier;
@@ -202,11 +202,11 @@ class Order extends Model<InferAttributes<Order>, InferCreationAttributes<Order>
   // Class methods
   declare getOrCreateMembers: () => Promise<[MemberModelInterface, MemberModelInterface]>;
   declare getUser: () => Promise<User | undefined>;
-  declare getSubscriptionForUser: (user: User) => Promise<SubscriptionInterface | null>;
+  declare getSubscriptionForUser: (user: User) => Promise<Subscription | null>;
   declare markAsPaid: (user: User) => Promise<Order>;
   declare getTotalTransactions: () => Promise<number> | number;
   declare getUserForActivity: () => Promise<User | undefined>;
-  declare validatePaymentMethod: (paymentMethod: PaymentMethodModelInterface) => Promise<PaymentMethodModelInterface>;
+  declare validatePaymentMethod: (paymentMethod: PaymentMethod) => Promise<PaymentMethod>;
   declare populate: () => Promise<Order>;
   declare setPaymentMethod: (paymentMethodData: object) => Promise<Order>;
   /**
@@ -225,7 +225,7 @@ class Order extends Model<InferAttributes<Order>, InferCreationAttributes<Order>
    */
   declare lock: <T>(callback: () => T, options?: { retries?: number; retryDelay?: number }) => Promise<T>;
   declare isLocked: () => boolean;
-  declare unPause: (user: User, params: { UserTokenId?: number }) => Promise<Order>;
+  declare createResumeActivity: (user: User, params: { UserTokenId?: number }) => Promise<void>;
   declare markSimilarPausedOrdersAsCancelled: () => Promise<void>;
 
   // Getter Methods
@@ -865,15 +865,9 @@ Order.prototype.isLocked = function (): boolean {
  *
  * @param user - The user who is unpausing the order
  */
-Order.prototype.unPause = async function (user: User, { UserTokenId = undefined } = {}): Promise<Order> {
-  if (this.status !== OrderStatus.PAUSED) {
-    return this;
-  }
-
+Order.prototype.createResumeActivity = async function (user: User, { UserTokenId = undefined } = {}): Promise<void> {
   const collective = this.collective || (await this.getCollective());
   const HostCollectiveId = collective.HostCollectiveId;
-
-  await this.update({ status: OrderStatus.ACTIVE });
   await Activity.create({
     type: ActivityTypes.SUBSCRIPTION_RESUMED,
     UserId: user.id,
@@ -888,8 +882,6 @@ Order.prototype.unPause = async function (user: User, { UserTokenId = undefined 
       user: user.info,
     },
   });
-
-  return this;
 };
 
 /**

@@ -11,9 +11,9 @@ import { VAT_OPTIONS } from '../constants/vat';
 import models, { Collective, Member, Op, sequelize } from '../models';
 import Expense from '../models/Expense';
 import { MemberModelInterface } from '../models/Member';
-import { MemberInvitationModelInterface } from '../models/MemberInvitation';
+import MemberInvitation from '../models/MemberInvitation';
 import Order from '../models/Order';
-import { PaymentMethodModelInterface } from '../models/PaymentMethod';
+import PaymentMethod from '../models/PaymentMethod';
 
 import logger from './logger';
 import { stripHTML } from './sanitize-html';
@@ -65,6 +65,7 @@ export const COLLECTIVE_SETTINGS_KEYS_LIST = [
   'bitcoin',
   'categories',
   'collectivePage',
+  'crowdfundingRedesign',
   'disableCustomContributions',
   'dismissedHelpMessages',
   'disableCryptoContributions',
@@ -91,6 +92,7 @@ export const COLLECTIVE_SETTINGS_KEYS_LIST = [
   'moderation',
   'paymentMethods',
   'payoutsTwoFactorAuth',
+  'preview',
   'recommendedCollectives',
   'style',
   'superCollectiveTag',
@@ -417,7 +419,7 @@ export async function deleteCollective(collective) {
   const paymentMethods = await models.PaymentMethod.findAll({
     where: { CollectiveId: collective.id },
   });
-  await map(paymentMethods, (paymentMethod: PaymentMethodModelInterface) => paymentMethod.destroy(), {
+  await map(paymentMethods, (paymentMethod: PaymentMethod) => paymentMethod.destroy(), {
     concurrency: 3,
   });
 
@@ -429,7 +431,7 @@ export async function deleteCollective(collective) {
   const memberInvitations = await models.MemberInvitation.findAll({
     where: { CollectiveId: collective.id },
   });
-  await map(memberInvitations, (memberInvitation: MemberInvitationModelInterface) => memberInvitation.destroy(), {
+  await map(memberInvitations, (memberInvitation: MemberInvitation) => memberInvitation.destroy(), {
     concurrency: 3,
   });
 

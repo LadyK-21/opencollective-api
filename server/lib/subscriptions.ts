@@ -9,7 +9,7 @@ import { BadRequest, Unauthorized, UnexpectedError } from '../graphql/errors';
 import { sequelize } from '../models';
 import { MemberModelInterface } from '../models/Member';
 import Order from '../models/Order';
-import { PaymentMethodModelInterface } from '../models/PaymentMethod';
+import PaymentMethod from '../models/PaymentMethod';
 import Tier from '../models/Tier';
 import User from '../models/User';
 
@@ -21,31 +21,53 @@ const getIsSubscriptionManagedExternally = pm => {
 };
 
 /**
- * When the contribution gets updated, we need to update the next charge date as well
+ * When the contribution gets updated, we need to update the next charge date as well.
+ *
+ * If reactivating the contribution on the same interval (month/year), keep the previous "next charge date". Otherwise,
+ * set the next charge date to the beginning of the next interval.
  */
-const getNextChargeDateForUpdateContribution = (baseNextChargeDate, newInterval) => {
+const getNextChargeDateForUpdateContribution = (
+  baseNextChargeDate: Date,
+  newInterval: Order['interval'],
+  prevInterval: Order['interval'],
+  supportsOffCycle: boolean,
+) => {
   const previousNextChargeDate = moment(baseNextChargeDate);
-  if (previousNextChargeDate.isBefore(moment())) {
-    // If the contribution was pending, keep it in the past
+  const maxDiffInDaysToReusePreviousNextChargeDate = newInterval === 'month' ? 25 : 340; // 25 days for monthly, 340 days for yearly
+  const now = moment();
+  const nextChargeIsFuture = previousNextChargeDate.isAfter(now);
+  const isKeepingInterval = newInterval === prevInterval;
+
+  // We allow re-using the previous next charge date if it's no too old or if the next charge date is in the future (and the new date is supported)
+  if (nextChargeIsFuture) {
+    if (isKeepingInterval && (supportsOffCycle || previousNextChargeDate.date() === 1)) {
+      return previousNextChargeDate;
+    }
+  } else if (now.diff(previousNextChargeDate, 'days') < maxDiffInDaysToReusePreviousNextChargeDate) {
     return previousNextChargeDate;
-  } else if (newInterval === 'year') {
+  }
+
+  // Otherwise, we need to calculate the next charge date
+  if (newInterval === 'year') {
     // Yearly => beginning of next year
-    return moment().add(1, 'years').startOf('year');
+    return now.add(1, 'years').startOf('year');
+  } else if (now.date() === 1 && !nextChargeIsFuture) {
+    // When updating from yearly to monthly on the first day of the month, we can charge today
+    return supportsOffCycle ? now : now.startOf('month');
   } else if (previousNextChargeDate.date() > 15) {
     // Set the next charge date to 2 months time if the subscription was made after 15th of the month.
-    return moment().add(2, 'months').startOf('month');
+    return now.add(2, 'months').startOf('month');
   } else {
     // Otherwise, next charge date will be the beginning of the next month
-    return moment().add(1, 'months').startOf('month');
+    return now.add(1, 'months').startOf('month');
   }
 };
 
 export const updatePaymentMethodForSubscription = async (
   user: User,
   order: Order,
-  newPaymentMethod: PaymentMethodModelInterface,
+  newPaymentMethod: PaymentMethod,
 ): Promise<Order> => {
-  const prevPaymentMethod = order.paymentMethod;
   const newPaymentMethodCollective = await newPaymentMethod.getCollective();
   if (!user.isAdminOfCollective(newPaymentMethodCollective)) {
     throw new Unauthorized("You don't have permission to use this payment method");
@@ -86,9 +108,9 @@ export const updatePaymentMethodForSubscription = async (
 
   // Subscription changes
   const newSubscriptionData = { isActive: true, deactivatedAt: null };
-  const wasManagedExternally = getIsSubscriptionManagedExternally(prevPaymentMethod);
   const isManagedExternally = getIsSubscriptionManagedExternally(newPaymentMethod);
-  if (wasManagedExternally && !isManagedExternally) {
+
+  if (!isManagedExternally) {
     // Reset flags for managing the subscription externally
     newSubscriptionData['isManagedExternally'] = false;
     newSubscriptionData['paypalSubscriptionId'] = null;
@@ -96,7 +118,7 @@ export const updatePaymentMethodForSubscription = async (
     // Update the next charge dates
     const previousNextChargeDate = order.Subscription.nextChargeDate;
     const interval = order.Subscription.interval;
-    const nextChargeDate = getNextChargeDateForUpdateContribution(previousNextChargeDate, interval);
+    const nextChargeDate = getNextChargeDateForUpdateContribution(previousNextChargeDate, interval, interval, false);
     newSubscriptionData['nextChargeDate'] = nextChargeDate.toDate();
     newSubscriptionData['nextPeriodStart'] = nextChargeDate.toDate();
   }
@@ -211,9 +233,16 @@ export const updateSubscriptionDetails = async (
     newOrderData['interval'] !== order.interval &&
     newOrderData['interval'] !== INTERVALS.FLEXIBLE
   ) {
+    const prevInterval = order.interval;
     const newInterval = newOrderData['interval'];
     const previousNextChargeDate = order.Subscription.nextChargeDate;
-    const nextChargeDate = getNextChargeDateForUpdateContribution(previousNextChargeDate, newInterval);
+    const supportsOffCycle = getIsSubscriptionManagedExternally(order.paymentMethod);
+    const nextChargeDate = getNextChargeDateForUpdateContribution(
+      previousNextChargeDate,
+      newInterval,
+      prevInterval,
+      supportsOffCycle,
+    );
     newSubscriptionData['nextChargeDate'] = nextChargeDate.toDate();
     newSubscriptionData['nextPeriodStart'] = nextChargeDate.toDate();
   }

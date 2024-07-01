@@ -10,7 +10,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import { GraphQLDateTime } from 'graphql-scalars';
+import { GraphQLDateTime, GraphQLNonEmptyString } from 'graphql-scalars';
 import { find, get, isEmpty, isNil, keyBy, mapValues, set, uniq } from 'lodash';
 import moment from 'moment';
 
@@ -35,13 +35,14 @@ import Agreement from '../../../models/Agreement';
 import { LEGAL_DOCUMENT_TYPE } from '../../../models/LegalDocument';
 import { PayoutMethodTypes } from '../../../models/PayoutMethod';
 import { allowContextPermission, PERMISSION_TYPE } from '../../common/context-permissions';
-import { checkRemoteUserCanUseHost } from '../../common/scope-check';
+import { checkRemoteUserCanUseHost, checkRemoteUserCanUseTransactions } from '../../common/scope-check';
 import { Unauthorized, ValidationFailed } from '../../errors';
 import { GraphQLAccountCollection } from '../collection/AccountCollection';
 import { GraphQLAccountingCategoryCollection } from '../collection/AccountingCategoryCollection';
 import { GraphQLAgreementCollection } from '../collection/AgreementCollection';
 import { GraphQLHostApplicationCollection } from '../collection/HostApplicationCollection';
 import { GraphQLLegalDocumentCollection } from '../collection/LegalDocumentCollection';
+import { GraphQLTransactionsImportsCollection } from '../collection/TransactionsImportsCollection';
 import { GraphQLVendorCollection } from '../collection/VendorCollection';
 import { GraphQLVirtualCardCollection } from '../collection/VirtualCardCollection';
 import {
@@ -83,6 +84,7 @@ import URL from '../scalar/URL';
 
 import { GraphQLContributionStats } from './ContributionStats';
 import { GraphQLExpenseStats } from './ExpenseStats';
+import { GraphQLHostExpensesReports } from './HostExpensesReport';
 import { GraphQLHostMetrics } from './HostMetrics';
 import { GraphQLHostMetricsTimeSeries } from './HostMetricsTimeSeries';
 import { GraphQLHostPlan } from './HostPlan';
@@ -453,6 +455,78 @@ export const GraphQLHost = new GraphQLObjectType({
           const timeUnit = args.timeUnit || getTimeUnit(getNumberOfDays(dateFrom, dateTo, host) || 1);
           const collectiveIds = args.account && (await fetchAccountsIdsWithReference(args.account));
           return { host, collectiveIds, timeUnit, dateFrom, dateTo };
+        },
+      },
+      hostExpensesReport: {
+        type: GraphQLHostExpensesReports,
+        description: 'EXPERIMENTAL (this may change or be removed)',
+        args: {
+          timeUnit: {
+            type: GraphQLTimeUnit,
+            defaultValue: 'MONTH',
+          },
+          dateFrom: {
+            type: GraphQLDateTime,
+          },
+          dateTo: {
+            type: GraphQLDateTime,
+          },
+        },
+        /**
+         * @param {import("../../../models/Collective").default} host
+         * @param {{ timeUnit: import("../enum/TimeUnit").TimeUnit; dateFrom: Date; dateTo: Date }} args
+         */
+        resolve: async (host, args) => {
+          if (args.timeUnit !== 'MONTH' && args.timeUnit !== 'QUARTER' && args.timeUnit !== 'YEAR') {
+            throw new Error('Only monthly, quarterly and yearly reports are supported.');
+          }
+
+          const query = `
+            WITH HostCollectiveIds AS (
+              SELECT "id" FROM "Collectives"
+              WHERE "id" = :hostCollectiveId
+              OR ("ParentCollectiveId" = :hostCollectiveId AND "type" != 'VENDOR')
+            )
+            SELECT
+              DATE_TRUNC(:timeUnit, e."createdAt" AT TIME ZONE 'UTC') AS "date",
+              SUM(t."amountInHostCurrency") AS "amount",
+              (SELECT "currency" FROM "Collectives" where id = :hostCollectiveId) as "currency",
+              COUNT(e."id") AS "count",
+              CASE
+                  WHEN e."CollectiveId" IN (SELECT * FROM HostCollectiveIds) THEN TRUE ELSE FALSE
+              END AS "isHost",
+              e."AccountingCategoryId"
+
+            FROM "Expenses" e
+            JOIN "Transactions" t ON t."ExpenseId" = e.id
+
+            WHERE e."HostCollectiveId" = :hostCollectiveId
+            AND t."kind" = 'EXPENSE' AND t."type" = 'CREDIT' AND NOT t."isRefund" AND t."RefundTransactionId" IS NULL AND t."deletedAt" IS NULL
+            AND e."status" = 'PAID'
+            AND e."deletedAt" IS NULL
+            ${args.dateFrom ? 'AND e."createdAt" >= :dateFrom' : ''}
+            ${args.dateTo ? 'AND e."createdAt" <= :dateTo' : ''}
+
+            GROUP BY "date", "isHost", e."AccountingCategoryId"
+          `;
+
+          const queryResult = await sequelize.query(query, {
+            replacements: {
+              hostCollectiveId: host.id,
+              timeUnit: args.timeUnit,
+              dateTo: moment(args.dateTo).utc().toISOString(),
+              dateFrom: moment(args.dateFrom).utc().toISOString(),
+            },
+            type: sequelize.QueryTypes.SELECT,
+            raw: true,
+          });
+
+          return {
+            timeUnit: args.timeUnit,
+            dateFrom: args.dateFrom,
+            dateTo: args.dateTo,
+            nodes: queryResult,
+          };
         },
       },
       supportedPaymentMethods: {
@@ -1667,6 +1741,55 @@ export const GraphQLHost = new GraphQLObjectType({
             limit,
             offset,
           };
+        },
+      },
+      transactionsImports: {
+        type: new GraphQLNonNull(GraphQLTransactionsImportsCollection),
+        description: 'Returns a list of transactions imports for this host',
+        args: {
+          ...CollectionArgs,
+          orderBy: {
+            type: new GraphQLNonNull(GraphQLChronologicalOrderInput),
+            description: 'The order of results',
+            defaultValue: CHRONOLOGICAL_ORDER_INPUT_DEFAULT_VALUE,
+          },
+        },
+        async resolve(host, args, req) {
+          checkRemoteUserCanUseTransactions(req);
+          if (!req.remoteUser.isAdminOfCollective(host)) {
+            throw new Unauthorized('You need to be logged in as an admin of the host to see its transactions imports');
+          }
+
+          const where = { CollectiveId: host.id };
+          return {
+            limit: args.limit,
+            offset: args.offset,
+            totalCount: () => models.TransactionsImport.count({ where }),
+            nodes: () =>
+              models.TransactionsImport.findAll({
+                where,
+                limit: args.limit,
+                offset: args.offset,
+                order: [[args.orderBy.field, args.orderBy.direction]],
+              }),
+          };
+        },
+      },
+      transactionsImportsSources: {
+        type: new GraphQLNonNull(new GraphQLList(GraphQLNonEmptyString)),
+        description: 'Returns a list of transactions imports sources for this host',
+        async resolve(host, args, req) {
+          checkRemoteUserCanUseHost(req);
+          if (!req.remoteUser.isAdminOfCollective(host)) {
+            throw new Unauthorized(
+              'You need to be logged in as an admin of the host to see its transactions imports sources',
+            );
+          }
+
+          return models.TransactionsImport.aggregate('source', 'DISTINCT', {
+            plain: false,
+            where: { CollectiveId: host.id },
+          }).then(results => results.map(({ DISTINCT }) => DISTINCT));
         },
       },
     };

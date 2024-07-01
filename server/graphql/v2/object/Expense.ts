@@ -16,8 +16,9 @@ import ActivityTypes from '../../../constants/activities';
 import expenseStatus from '../../../constants/expense-status';
 import ExpenseTypes from '../../../constants/expense-type';
 import OAuthScopes from '../../../constants/oauth-scopes';
+import { floatAmountToCents } from '../../../lib/math';
 import SQLQueries from '../../../lib/queries';
-import models, { Activity, Op } from '../../../models';
+import models, { Activity } from '../../../models';
 import { CommentType } from '../../../models/Comment';
 import ExpenseModel from '../../../models/Expense';
 import LegalDocument, { LEGAL_DOCUMENT_TYPE, LegalDocumentAttributes } from '../../../models/LegalDocument';
@@ -412,7 +413,7 @@ export const GraphQLExpense = new GraphQLObjectType<ExpenseModel, express.Reques
         type: GraphQLString,
         description: 'Additional information about the payment as HTML. Only visible to user and admins.',
         async resolve(expense, _, req) {
-          if (await ExpenseLib.canSeeExpensePayoutMethod(req, expense)) {
+          if (await ExpenseLib.canSeeExpenseAttachments(req, expense)) {
             return expense.privateMessage;
           }
         },
@@ -504,12 +505,11 @@ export const GraphQLExpense = new GraphQLObjectType<ExpenseModel, express.Reques
             return null;
           }
 
-          const year = expense.createdAt.getFullYear();
           const accountIds = await SQLQueries.getTaxFormsRequiredForAccounts({
             ignoreReceived: false,
             HostCollectiveId: host.id,
             CollectiveId: expense.FromCollectiveId,
-            year,
+            allTime: true,
           });
           if (!accountIds.size || !accountIds.has(expense.FromCollectiveId)) {
             return { nodes: [], totalCount: 0, limit, offset };
@@ -517,7 +517,6 @@ export const GraphQLExpense = new GraphQLObjectType<ExpenseModel, express.Reques
 
           const where: WhereOptions<LegalDocumentAttributes> = {
             CollectiveId: expense.FromCollectiveId,
-            year: { [Op.gte]: year },
           };
           if (args.type) {
             where.documentType = args.type;
@@ -577,12 +576,12 @@ export const GraphQLExpense = new GraphQLObjectType<ExpenseModel, express.Reques
             }
 
             const sourceAmount = {
-              value: quote.paymentOption.sourceAmount * 100,
+              value: floatAmountToCents(quote.paymentOption.sourceAmount),
               currency: quote.paymentOption.sourceCurrency,
             };
             const estimatedDeliveryAt = quote.paymentOption.estimatedDelivery;
             const paymentProcessorFeeAmount = {
-              value: quote.paymentOption.fee.total * 100,
+              value: floatAmountToCents(quote.paymentOption.fee.total),
               currency: quote.sourceCurrency,
             };
             return { sourceAmount, estimatedDeliveryAt, paymentProcessorFeeAmount };
